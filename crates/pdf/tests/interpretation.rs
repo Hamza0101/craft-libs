@@ -55,6 +55,7 @@ mod device {
     #[derive(Default)]
     struct RecordDevice {
         paths: Vec<BezPath>,
+        clips: Vec<BezPath>,
     }
 
     impl Device<'_> for RecordDevice {
@@ -63,7 +64,9 @@ mod device {
         fn draw_path(&mut self, path: &BezPath, _: Affine, _: &Paint<'_>, _: &PathDrawMode) {
             self.paths.push(path.clone());
         }
-        fn push_clip_path(&mut self, _: &ClipPath) {}
+        fn push_clip_path(&mut self, clip_path: &ClipPath) {
+            self.clips.push(clip_path.path.clone());
+        }
         fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'_>>, _: BlendMode) {}
         fn draw_glyph(&mut self, _: &Glyph<'_>, _: Affine, _: Affine, _: &Paint<'_>, _: &GlyphDrawMode) {}
         fn draw_image(&mut self, _: Image<'_, '_>, _: Affine) {}
@@ -72,6 +75,10 @@ mod device {
     }
 
     fn record(content: &str) -> Vec<BezPath> {
+        record_device(content).paths
+    }
+
+    fn record_device(content: &str) -> RecordDevice {
         let bytes = format!(
             "%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 60] /Contents 4 0 R >> endobj\n4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\ntrailer << /Root 1 0 R >>\n%%EOF",
             content.len()
@@ -88,7 +95,7 @@ mod device {
         );
         let mut device = RecordDevice::default();
         craft_pdf::interpret_page(page, &mut context, &mut device).unwrap();
-        device.paths
+        device
     }
 
     /// The points of each subpath, ignoring the closing command.
@@ -126,6 +133,22 @@ mod device {
                 assert_eq!(points(p), [(80.0, 40.0), (80.0, 20.0), (60.0, 30.0), (40.0, 20.0), (40.0, 40.0)], "{op}");
             }
         }
+    }
+
+    /// The same mistake dropped a clip. `push_clip_path` skips a clip whose rectangle covers the
+    /// region already in force, so a five-point polyline clip spanning the page was taken for the
+    /// page rectangle and thrown away, and everything it should have hidden was painted.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn a_five_point_polyline_clip_is_not_discarded() {
+        // The zigzag's corners are the page's corners, so its bounding box is the whole page. The
+        // device sees the page transform applied, which flips y about the 60 pt page height.
+        let device = record_device("0 60 m 0 0 l 50 30 l 100 0 l 100 60 l W n 1 0 0 rg 0 0 100 60 re f");
+        assert_eq!(device.clips.len(), 1, "the clip reached the device");
+        assert_eq!(points(&device.clips[0]), [(0.0, 0.0), (0.0, 60.0), (50.0, 30.0), (100.0, 60.0), (100.0, 0.0)]);
+        // A clip that really is the page rectangle still costs nothing.
+        let plain = record_device("0 0 100 60 re W n 1 0 0 rg 0 0 100 60 re f");
+        assert!(plain.clips.is_empty(), "a covering rectangle clip is still skipped");
     }
 
     /// A real rectangle still takes the rectangle route, written either way: `m l l l` and closed,
