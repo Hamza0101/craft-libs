@@ -7,7 +7,7 @@ mod device {
         BlendMode, ClipPath, Context, Device, GlyphDrawMode, Image, InterpreterCache, InterpreterSettings, Paint, PathDrawMode, SoftMask,
         TransformExt, font::Glyph,
     };
-    use kurbo::{Affine, BezPath, Rect};
+    use kurbo::{Affine, BezPath, Rect, Shape};
 
     #[derive(Default)]
     struct PathDevice {
@@ -47,6 +47,104 @@ mod device {
             InterpreterSettings::default(),
         );
         craft_pdf::interpret_page(page, &mut context, device)
+    }
+
+    /// Records what the device is asked to paint. `draw_rect` is left at its default, which
+    /// forwards to `draw_path`, so a path replaced by a rectangle is visible here as the
+    /// rectangle's path.
+    #[derive(Default)]
+    struct RecordDevice {
+        paths: Vec<BezPath>,
+    }
+
+    impl Device<'_> for RecordDevice {
+        fn set_soft_mask(&mut self, _: Option<SoftMask<'_>>) {}
+        fn set_blend_mode(&mut self, _: BlendMode) {}
+        fn draw_path(&mut self, path: &BezPath, _: Affine, _: &Paint<'_>, _: &PathDrawMode) {
+            self.paths.push(path.clone());
+        }
+        fn push_clip_path(&mut self, _: &ClipPath) {}
+        fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'_>>, _: BlendMode) {}
+        fn draw_glyph(&mut self, _: &Glyph<'_>, _: Affine, _: Affine, _: &Paint<'_>, _: &GlyphDrawMode) {}
+        fn draw_image(&mut self, _: Image<'_, '_>, _: Affine) {}
+        fn pop_clip_path(&mut self) {}
+        fn pop_transparency_group(&mut self) {}
+    }
+
+    fn record(content: &str) -> Vec<BezPath> {
+        let bytes = format!(
+            "%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 60] /Contents 4 0 R >> endobj\n4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\ntrailer << /Root 1 0 R >>\n%%EOF",
+            content.len()
+        );
+        let pdf = craft_pdf::open_slice(bytes.as_bytes(), None).unwrap();
+        let page = &pdf.pages()[0];
+        let cache = InterpreterCache::new();
+        let mut context = Context::new(
+            page.initial_transform(true).to_kurbo(),
+            Rect::new(0.0, 0.0, 100.0, 60.0),
+            &cache,
+            page.xref(),
+            InterpreterSettings::default(),
+        );
+        let mut device = RecordDevice::default();
+        craft_pdf::interpret_page(page, &mut context, &mut device).unwrap();
+        device.paths
+    }
+
+    /// The points of each subpath, ignoring the closing command.
+    fn points(path: &BezPath) -> Vec<(f64, f64)> {
+        path.elements()
+            .iter()
+            .filter_map(|el| match el {
+                kurbo::PathEl::MoveTo(p) | kurbo::PathEl::LineTo(p) => Some((p.x, p.y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn closed(path: &BezPath) -> bool {
+        path.elements().iter().any(|el| matches!(el, kurbo::PathEl::ClosePath))
+    }
+
+    /// A five-point open polyline is not a rectangle, even when its ends happen to touch all four
+    /// corners of its own bounding box. `path_as_rect` matched it on element count alone and the
+    /// whole path was painted as that box: this zigzag arrived as `40 0 m 80 0 l 80 20 l 40 20 l`
+    /// closed, losing its middle peak.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn a_five_point_polyline_is_not_painted_as_its_bounding_box() {
+        let zigzag = "0 0 0 RG 2 w 80 40 m 80 20 l 60 30 l 40 20 l 40 40 l S";
+        let paths = record(zigzag);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(points(&paths[0]), [(80.0, 40.0), (80.0, 20.0), (60.0, 30.0), (40.0, 20.0), (40.0, 40.0)]);
+        assert!(!closed(&paths[0]), "the path was left open, as `S` leaves it");
+        // Filling and filling-and-stroking took the same route.
+        for op in ["f", "B"] {
+            let paths = record(&format!("0 0 0 rg 0 0 0 RG 2 w 80 40 m 80 20 l 60 30 l 40 20 l 40 40 l {op}"));
+            assert!(!paths.is_empty(), "{op}");
+            for p in &paths {
+                assert_eq!(points(p), [(80.0, 40.0), (80.0, 20.0), (60.0, 30.0), (40.0, 20.0), (40.0, 40.0)], "{op}");
+            }
+        }
+    }
+
+    /// A real rectangle still takes the rectangle route, written either way: `m l l l` and closed,
+    /// or `m l l l l` back to its first corner. Both reach the device as four corners, closed.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn a_rectangle_is_still_recognised_however_it_is_written() {
+        for content in ["1 0 0 rg 40 20 m 80 20 l 80 40 l 40 40 l f", "1 0 0 rg 40 20 m 80 20 l 80 40 l 40 40 l 40 20 l f", "1 0 0 rg 0 0 40 20 re f"]
+        {
+            let paths = record(content);
+            assert_eq!(paths.len(), 1, "{content}");
+            let pts = points(&paths[0]);
+            let bbox = paths[0].bounding_box();
+            assert!(pts.len() <= 5, "{content}: {pts:?}");
+            assert!(
+                pts.iter().all(|(x, y)| (*x == bbox.x0 || *x == bbox.x1) && (*y == bbox.y0 || *y == bbox.y1)),
+                "{content}: every point is a corner, {pts:?}"
+            );
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
