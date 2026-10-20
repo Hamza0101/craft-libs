@@ -156,6 +156,24 @@ mod device {
         }
     }
 
+    /// A close that is not the last element starts a new subpath, so the points collected are not
+    /// one outline: every corner is hit with axis-aligned steps, while the path really closes on
+    /// the diagonal back to the start and then draws a separate line. Taken for the bounding box,
+    /// such a clip covers the page and is discarded, so what it should hide is painted
+    /// (#175 review).
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn a_close_in_the_middle_of_a_path_is_not_a_rectangle() {
+        // The four points are the page's corners, so the bounding box is the whole page; `h`
+        // before the last of them is what makes it two subpaths rather than a rectangle.
+        let device = record_device("0 0 m 100 0 l 100 60 l h 0 60 l W n 1 0 0 rg 0 0 100 60 re f");
+        assert_eq!(device.clips.len(), 1, "the clip reached the device instead of being taken for the page");
+
+        // A real rectangle written the same way, with the close last, still costs nothing.
+        let plain = record_device("0 0 m 100 0 l 100 60 l 0 60 l h W n 1 0 0 rg 0 0 100 60 re f");
+        assert_eq!(plain.clips.len(), 0, "a clip that is the page rectangle is still discarded");
+    }
+
     /// The same mistake dropped a clip. `push_clip_path` skips a clip whose rectangle covers the
     /// region already in force, so a five-point polyline clip spanning the page was taken for the
     /// page rectangle and thrown away, and everything it should have hidden was painted.

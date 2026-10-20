@@ -494,6 +494,11 @@ pub(crate) fn path_as_rect(path: &BezPath) -> Option<Rect> {
             PathEl::LineTo(l) => check_point(*l),
             PathEl::QuadTo(_, _) => return None,
             PathEl::CurveTo(_, _, _) => return None,
+            // PdfCraft patch: a close that is not the last element starts a new subpath, so the
+            // points collected are not one outline: `M(0,0) L(100,0) L(100,60) Z L(0,60)` hits
+            // every corner with axis-aligned steps, while the path really closes on the diagonal
+            // from (100,60) to (0,0) and then draws a separate line (#175 review).
+            PathEl::ClosePath if idx + 1 != path.elements().len() => return None,
             PathEl::ClosePath => {}
         }
     }
