@@ -461,8 +461,14 @@ pub(crate) fn path_as_rect(path: &BezPath) -> Option<Rect> {
     // between them, so a five-point polyline whose ends reach every corner of its own bounding
     // box was painted as that box.
     let mut off_corner = false;
+    // PdfCraft patch: the points in order, to check that each edge runs along one axis. Four
+    // corners, each hit, still admits a bowtie -- `(min_x, min_y) -> (max_x, max_y) ->
+    // (min_x, max_y) -> (max_x, min_y)` crosses the interior on two diagonals and covers every
+    // corner (#175 review).
+    let mut points: Vec<Point> = Vec::with_capacity(4);
 
     let mut check_point = |p: Point| {
+        points.push(p);
         let hits = [
             p.x.is_nearly_equal(min_x) && p.y.is_nearly_equal(min_y),
             p.x.is_nearly_equal(min_x) && p.y.is_nearly_equal(max_y),
@@ -492,7 +498,15 @@ pub(crate) fn path_as_rect(path: &BezPath) -> Option<Rect> {
         }
     }
 
-    if !off_corner && corners[0] && corners[1] && corners[2] && corners[3] {
+    // PdfCraft patch: every edge, the closing one included, moves along one axis only -- a
+    // rectangle's sides alternate horizontal and vertical, and a diagonal changes both.
+    let axis_aligned = points.len() == 4
+        && (0..4).all(|i| {
+            let (a, b) = (points[i], points[(i + 1) % 4]);
+            a.x.is_nearly_equal(b.x) != a.y.is_nearly_equal(b.y)
+        });
+
+    if !off_corner && axis_aligned && corners[0] && corners[1] && corners[2] && corners[3] {
         Some(bbox)
     } else {
         None

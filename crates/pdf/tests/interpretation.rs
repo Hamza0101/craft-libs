@@ -135,6 +135,27 @@ mod device {
         }
     }
 
+    /// Four points, each an exact corner of the bounding box, and still not a rectangle: a bowtie
+    /// crosses the interior on two diagonals. Covering the corners says nothing about the order
+    /// they are visited in, so the sides have to run along the axes (#175 review).
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn a_bowtie_through_every_corner_is_not_a_rectangle() {
+        // (40,20) -> (80,40) -> (40,40) -> (80,20), closed: every corner of 40..80 x 20..40.
+        let bowtie = "0 0 0 rg 40 20 m 80 40 l 40 40 l 80 20 l h f";
+        let paths = record(bowtie);
+        assert!(!paths.is_empty());
+        for p in &paths {
+            assert_eq!(points(p), [(40.0, 20.0), (80.0, 40.0), (40.0, 40.0), (80.0, 20.0)], "painted as its bounding box");
+        }
+        // The same four corners in rectangle order are still collapsed to the rectangle.
+        let rect = record("0 0 0 rg 40 20 m 80 20 l 80 40 l 40 40 l h f");
+        assert!(!rect.is_empty());
+        for p in &rect {
+            assert_eq!(points(p).len(), 4, "a real rectangle still has its four points");
+        }
+    }
+
     /// The same mistake dropped a clip. `push_clip_path` skips a clip whose rectangle covers the
     /// region already in force, so a five-point polyline clip spanning the page was taken for the
     /// page rectangle and thrown away, and everything it should have hidden was painted.
